@@ -1,0 +1,83 @@
+# SECTION 1: GENERIC SETTINGS
+
+# SECTION 1.1: PATHS to FILES
+base_path: &base_path ./tests/res/
+
+file_paths:
+  config_file: &config_file [*base_path, GMM_config_testing.h5]
+  tables_file: &tables_file [*base_path, GMM_tables_testing.h5]
+
+# SECTION 1.2: MODEL VERSIONS
+model_versions:
+  model_version: &version GMM-V7
+
+# SECTION 1.3: DATA SOURCES
+# We recognize the following data types:
+# - xarray_dataarray: a single xarray dataarray
+# - xarray_dataset: a single xarray dataset consisting of multiple dataarrays
+# - xarray_datatree: a tree of xarray datasets
+# - inline: a dictionary of data - useful for simple inputs
+#
+# The data types are independent of the file format / structure.
+# The file format is currently determined by the file extension, e.g.,
+# - .h5: HDF5 file
+# - .zarr: Zarr data store (actually a directory)
+#
+# Note that both HDF5 and Zarr support multiple datasets in a single file,
+# which can be opened/read as a datatree, or, by specifying a "group" name,
+# as a single dataset. The group specification can also be used to select
+# a specific dataaarray within a dataset.
+
+data_stores:
+  data_in: &data_in
+    type: xarray_dataset
+    path: *config_file
+    group: *version
+
+  data_out: &data_out
+    type: xarray_dataset
+    path: *tables_file
+    group: *version
+
+# sampling settings for various dimensions
+# this may include coordinate settings
+dimensions: &dimensions
+  dimension_1:
+    length: 10
+    interval: [1.4, 7.1]
+  dimension_2:
+    length: 10
+    sequence_spacing: log # default: linear
+    interval: [3.0, 40.0]
+    units: km
+  dimension_3: # allow for other ranges
+    length: 10
+  dimension_4: &gm_surface
+    length: 10
+
+# supplementary coordinates if more than one is needed for a dimension
+coordinates: &coordinates
+  dimension_3_alt: &dimension_3_alt
+    dim: dimension_3
+    sequence_spacing: log
+    interval: [1.0e-5, 10.0]
+    units: "donkeys"
+  dimension_3_alt_bis: &dimension_3_alt_bis
+    <<: *dimension_3_alt
+    multiplier: 981.0
+    units: "donkeys_squared"
+  dimension_4_alt: &dimension_4_alt
+    <<: *dimension_3_alt
+    dim: dimension_4
+    interval: [1.0e-3, 2.0]
+
+# SECTION 2: MODULE SPECIFIC SETTINGS
+modules:
+  dummy_module:
+    data_sources:
+      dummy_data_in: *data_in
+    data_sinks:
+      dummy_data_out: *data_out
+    dimensions: *dimensions
+    coordinates: *coordinates
+    n_workers: 1

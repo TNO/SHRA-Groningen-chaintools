@@ -52,7 +52,7 @@ class IntegrationTests(TestCase):
         # arrange
         # -------
         dataset_empty_expected = xr.load_dataset('./tests/res/test_empty_dataset.h5', engine='h5netcdf')
-        
+        #
         # act
         # ---
         dataset_empty = xf.prepare_ds(self.test_config)

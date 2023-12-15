@@ -163,6 +163,21 @@ def xr_flatten(da):
 
 
 def xr_distance(a, b, dims=["x", "y"]):
+    """
+    Calculates distance between a and b along dimensions dims.
+
+    Parameters
+    ----------
+    a : xr.DataArray
+    b : xr.DataArray
+    dims : list[str], optional
+
+    Returns
+    -------
+
+    """
+
+
     sqr = 0.0
     for d in dims:
         sqr = sqr + (a[d] - b[d]) ** 2
@@ -171,6 +186,19 @@ def xr_distance(a, b, dims=["x", "y"]):
 
 
 def xr_delay(a, b, dim="datetime"):
+    """
+
+    Parameters
+    ----------
+    a
+    b
+    dim : str, optional
+
+    Returns
+    -------
+
+    """
+
     d = (b[dim] - a[dim]).astype(int) / (24 * 3.6e12)  # convert to fractional days
     return d
 
@@ -265,6 +293,19 @@ def xr_smooth(
 
 
 def xr_make_nondecreasing(array, dim):
+    """
+
+
+    Parameters
+    ----------
+    array
+    dim
+
+    Returns
+    -------
+
+    """
+
     return xr.apply_ufunc(
         np.maximum.accumulate,
         array,
@@ -276,6 +317,18 @@ def xr_make_nondecreasing(array, dim):
 
 
 def xr_calculate_rate(array, dim="datetime", label="lower"):
+    """
+
+    Parameters
+    ----------
+    array
+    dim
+    label
+
+    Returns
+    -------
+
+    """
     s_diff = array.diff(dim, label=label)
     t_diff = array[dim].diff(dim, label=label).dt.days
     return s_diff / t_diff

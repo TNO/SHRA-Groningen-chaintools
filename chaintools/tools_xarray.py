@@ -2,7 +2,9 @@ import collections
 import numpy as np
 import xarray as xr
 import datatree as dt
+import warnings
 from pathlib import Path
+from copy import deepcopy
 
 
 def assign_dims(dim_spec, xarray_ds=None):
@@ -16,7 +18,13 @@ def assign_dims(dim_spec, xarray_ds=None):
             dim_dict[dim] = spec
 
         elif isinstance(spec, collections.abc.Mapping):
-            dim_dict[dim] = range_from_dict(spec)
+            if "interval" in spec:
+                dim_dict[dim] = range_from_dict(spec)
+            else:
+                dim_dict[dim] = range(spec.get("length", 0))
+
+        else:
+            raise SystemError(f"unknown dimension specification {spec}")
 
     new_ds = xarray_ds.expand_dims(dim_dict)
 
@@ -57,7 +65,7 @@ def assign_coords(coord_spec, xarray_ds):
 
 
 def range_from_dict(spec, len=None):
-    interval = spec.get("interval", [0.0, 1.0])
+    interval = spec.get("interval")
     spacing = spec.get("sequence_spacing", "linear")
     multiplier = spec.get("multiplier", 1.0)
     offset = spec.get("offset", 0.0)
@@ -107,6 +115,8 @@ def thin(xarray_ds, thinning_spec):
 
 
 def construct_path(path_spec):
+    if path_spec is None:
+        return None
     if isinstance(path_spec, str):
         path = Path(path_spec)
     elif isinstance(path_spec, collections.abc.Sequence):
@@ -116,7 +126,7 @@ def construct_path(path_spec):
 
 
 def data_source(**kwargs):
-    kwargs_full = kwargs.copy()
+    kwargs_full = deepcopy(kwargs)
     type = kwargs.pop("type", None)
     if type is None:
         raise SystemError("No data source type specified")
@@ -138,17 +148,8 @@ def data_source(**kwargs):
             else:
                 kwargs["engine"] = "h5netcdf"
         source = xarray_function[type](path, **kwargs)
-    elif type == "inline":
-        data = kwargs.pop("data", None)
-        if data is None:
-            raise SystemError(f"no data specified for inline data_source {kwargs_full}")
-        ds_dict = {}
-        for k, v in data.items():
-            vals = np.array(list(v.values()))
-            coords = np.array(list(v.keys()))
-            # TODO : the following is too arbitrary; why "weight"?
-            ds_dict[k + "_weight"] = xr.DataArray(vals, coords={k: coords})
-        source = xr.Dataset(ds_dict)
+    else:
+        raise SystemError(f"unknown data source type {type}")
 
     return source
 
@@ -156,12 +157,15 @@ def data_source(**kwargs):
 def open(name, config, **kwargs):
     # within a module we open data sources
     # in a more generic context we allow opening any data store
-    group_name = "data_sources"
-    if group_name not in config:
-        group_name = "data_stores"
+    section_name = "data_sources"
+    if section_name not in config:
+        section_name = "data_stores"
+    kwargs = make_group(config[section_name][name], kwargs)
+    kwargs = config[section_name][name] | kwargs
+
     chunking_allowed = kwargs.pop("chunking_allowed", True)
     ds = (
-        data_source(**config[group_name][name], **kwargs)
+        data_source(**kwargs)
         .pipe(filter, config.get("filters", {}))
         .pipe(thin, config.get("thinnings", {}))
     )
@@ -172,10 +176,21 @@ def open(name, config, **kwargs):
     return ds
 
 
+def open_tree(name, config, **kwargs):
+    local_config = deepcopy(config)
+    local_config["data_stores"][name]["type"] = "xarray_datatree"
+    local_config["data_stores"][name].pop("group")
+    ds = open(name, local_config, **kwargs)
+
+    return ds
+
+
 def store(ds, name, config, **kwargs):
+    kwargs = make_group(config["data_sinks"][name], kwargs)
     kwargs = config["data_sinks"][name] | kwargs
-    type = kwargs.pop("type", None)
+    _ = kwargs.pop("type")
     path = construct_path(kwargs.pop("path"))
+
     if path.suffix == ".zarr":
         if not "consolidated" in kwargs:
             kwargs["consolidated"] = True
@@ -183,6 +198,16 @@ def store(ds, name, config, **kwargs):
             kwargs["mode"] = "a"
         result = ds.drop_encoding().to_zarr(path, **kwargs)
     else:
+        # Ensure .zarr arguments 'append_dim' asnd 'mode'='w-' are removed, as they are not technically possible to
+        # use in .h5 files.
+        # For 'append_dim' give a warning, because it only returns one iteration over the dimension.
+        append_dimension = kwargs.pop("append_dim", False)
+        if "mode" in kwargs and kwargs["mode"] == "w-":
+            kwargs["mode"] = "w"
+        if append_dimension is not False:
+            warnings.warn(f"Storing data in .h5 format instead of intended .zarr format. "
+                          f"Only one iteration over dimension {append_dimension} will be stored.",
+                          category=UserWarning)
         if not "engine" in kwargs:
             kwargs["engine"] = "h5netcdf"
         result = ds.to_netcdf(path, **kwargs)
@@ -190,12 +215,28 @@ def store(ds, name, config, **kwargs):
     return result
 
 
+def make_group(config, kwargs):
+    group = None
+    if "group" in config:
+        group = construct_path(config["group"])
+    if "group" in kwargs:
+        if group is None:
+            group = construct_path(kwargs["group"])
+        else:
+            group = group / construct_path(kwargs["group"])
+    if group is not None:
+        kwargs["group"] = str(group)
+
+    return kwargs
+
+
 def prepare_ds(config):
+    drop_vars = [d for d, v in config["dimensions"].items() if "interval" not in v]
     ds = assign_dims(config["dimensions"])
     if "coordinates" in config:
         ds = assign_coords(config["coordinates"], ds)
-    if "chunks" in config:
-        ds = chunk(ds, config["chunks"])
+    ds = ds.drop_vars(drop_vars)
+
     return ds
 
 

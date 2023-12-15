@@ -50,7 +50,7 @@ dimensions: &dimensions
     sequence_spacing: log # default: linear
     interval: [3.0, 40.0]
     units: km
-  dimension_3: # allow for other ranges
+  dimension_3:
     length: 10
   dimension_4: &gm_surface
     length: 10

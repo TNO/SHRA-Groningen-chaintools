@@ -1,115 +1,120 @@
 import numpy as np
 import xarray as xr
 import scipy.ndimage as scpnd
-from shapely.geometry import Polygon
+import collections
 
 
-def add_bounds(da, xdim="x", ydim="y", edge="reflect"):
-    """Add bounds coordinates to a dataset. Only regular grid supported (1D coordinates).
-    Parameters
-    ----------
-    da : xr.Dataset
-      Xarray dataset defining grid centers
-    xdim, ydim : str
-      Name of the two coordinates.
-    edge : {'reflect', 'mean', float}
-      How the points at the edge are extrapolated.
-      If 'reflect', the boundary grid steps are the same as their immediate neighbors.
-      if 'mean', the boundary grid steps are the mean of all grid steps.
-      if a number, it is used as the boundary grid step.
-    Returns
-    -------
-    xr.Dataset
-      A copy of da with new grid corners coordinates, they have the same name as the center
-      coordinates with a '_b' suffix. Ex: lat_b and lon_b.
+# fraction of interval to ignore for rounding
+ROUND_THRESHOLD = 1.0e-6
+
+
+def bin_diff(value, dim, fill_value=None, direction=-1):
     """
-    x = da[xdim]
-    dx = x.diff(xdim, label="lower")
-    if edge == "reflect":
-        dx_left = dx[0]
-        dx_right = dx[-1]
-    elif edge == "mean":
-        dx_left = dx_right = dx.mean()
-    else:
-        dx_left = dx_right = edge
-    Xs = np.concatenate(([x[0] - dx_left / 2], x + dx / 2, [x[-1] + dx_right]))
-
-    y = da[ydim]
-    dy = y.diff(ydim, label="lower")
-    if edge == "reflect":
-        dy_left = dy[0]
-        dy_right = dy[-1]
-    elif edge == "mean":
-        dy_left = dy_right = dy.mean()
-    else:
-        dy_left = dy_right = edge
-    Ys = np.concatenate(([y[0] - dy_left / 2], y + dy / 2, [y[-1] + dy_right]))
-
-    xdimb = xdim + "_b"
-    ydimb = ydim + "_b"
-    return da.assign(**{xdimb: ((xdimb,), Xs), ydimb: ((ydimb,), Ys)})
-
-
-def compute_overlap_fraction(da, polys, dims=["x", "y"], poly_names=None):
-    """Compute the area weights of each polygon on each gridcell
+    Calculate the difference of a 1-D value array along a dimension. The
+    difference is calculated as the difference between the array values
+    and the values shifted in the direction. The default direction is -1,
+    which means the subtracted array is shifted to the left. This means
+    that the difference is taken with respect to the value on the right.
+    The opposite direction is 1, for which the difference is taken with
+    respect to the value on the left. The fill_value fills the unknown points.
 
     Parameters
     ----------
-    da : xr.DataArray or xr.Dataset
-      A xarray object defining the centers (and optionally the corners) of a grid.
-    polys : geopandas.GeoSeries or geopandas.GeoDataframe
-      A Series of Polygons, with a defined crs
-    dims : Sequence of str
-      The names of the two coordinates defining the grid corners in da. Both must be 1D in da.
-      If 4 names are passed, the last two are used as the grid corners
+    value : xr.DataArray
+        Value array.
+    dim : str
+        Dimension along which to calculate the difference.
+    fill_value : float, optional
+        Fill value for the shifted array. The default is None.
+    direction : int, optional
+        Direction of the shift. The default is -1.
+
     Returns
     -------
     xr.DataArray
-        The weights defined along dims[0] and dims[1], according to method mode, for each polygon.
-        The first dimension is the same index as in polys.
+        Difference array.
+
     """
+    if fill_value is None:
+        shift_value = value.shift({dim: direction})
+    else:
+        shift_value = value.shift({dim: direction}, fill_value=fill_value)
 
-    assert da.rio.crs.to_epsg() == polys.crs.to_epsg(), "The crs of the grid and the polygons must be the same"
+    return value - shift_value
 
-    xdim, ydim = dims
-    xdimb, ydimb = xdim + "_b", ydim + "_b"
-    da = add_bounds(da[dims], xdim=xdim, ydim=ydim, edge="reflect")
 
-    weights = np.empty((polys.shape[0], da[xdim].size, da[ydim].size), dtype=float)
+def bin_average(value, dim, fill_value=None, direction=-1):
+    """
+    Average consecutive points along a dimension. The averaging is performed
+    by averaging with a left- or right-shifted array. The default direction is
+    -1, which means the array is shifted to the left. This means that the average
+    at each point is the average of the value on the right and the value itself.
 
-    if not poly_names:
-        poly_names = polys.index.values
+    Parameters
+    ----------
+    value : xr.DataArray
+        Value array.
+    dim : str
+        Dimension along which to average.
+    fill_value : float, optional
+        Fill value for the shifted array. The default is None.
+    direction : int, optional
+        Direction of the shift. The default is -1.
 
-    for k, poly in enumerate(polys.geometry):
-        xs = da[xdimb].values
-        ys = da[ydimb].values
-        for i, x in enumerate(da[xdim]):
-            for j, y in enumerate(da[ydim]):
-                # grid around node
-                node_grid = Polygon(
-                    [
-                        (xs[i], ys[j]),
-                        (xs[i], ys[j + 1]),
-                        (xs[i + 1], ys[j + 1]),
-                        (xs[i + 1], ys[j]),
-                        (xs[i], ys[j]),
-                    ]
-                )
-                if node_grid.intersects(poly):
-                    w = node_grid.intersection(poly).area / node_grid.area
-                else:
-                    w = 0.0
-                weights[k, i, j] = w
-    desc = "The fraction of the gridcell that covers the polygon."
-    coords = {crd: crdda for crd, crdda in da.coords.items() if all([dim in [xdim, ydim] for dim in crdda.dims])}
-    coords["poly"] = poly_names
-    return xr.DataArray(
-        weights,
-        coords=coords,
-        dims=("poly", xdim, ydim),
-        name="weights",
-        attrs={"description": desc},
-    )
+    Returns
+    -------
+    xr.DataArray
+        Interpolated array.
+    """
+    if fill_value is None:
+        shift_value = value.shift({dim: direction})
+    else:
+        shift_value = value.shift({dim: direction}, fill_value=fill_value)
+
+    return 0.5 * (value + shift_value)
+
+
+def expectation_by_parts(survival_probabilities, summand, dim, average=True):
+    """
+    Calculate the expectation value of the summand give the survival probabilities
+    along a 1-D dimension. Rather than differencing the survival_probabilities, the
+    summand is differenced. This is the principle of summation by parts. It can be
+    useful when the array of survival probabilities is large relative to the summand.
+
+    Parameters
+    ----------
+    survival_probabilities : xr.DataArray
+        Survival probabilities.
+    summand : xr.DataArray
+        Summand.
+    dim : str
+        Dimension along which to sum.
+    interpolate : bool, optional
+        Whether to interpolate the summand at the bin centers. The default is True.
+
+    Returns
+    -------
+    sum : xr.DataArray
+        Sum of the product of the survival probabilities and the summand by parts.
+
+    """
+    # survival probabilities are defined on the bin edges
+    # the summand has to be defined on the bin centers
+    # calculate the summand at the bin centers
+    # after averaging, the poe is NaN at the last point in dim
+    if average:
+        store = summand.isel({dim: -1})
+        summand = bin_average(summand, dim)
+        summand[{dim: -1}] = store
+
+    # difference the summand
+    # since we need the difference between the next value and the current,
+    # we need to multiply by -1
+    diff_summand = -1 * bin_diff(summand, dim)
+    diff_summand[{dim: -1}] = 0.0
+
+    # carry out the summation by parts
+    return xr.dot(survival_probabilities, diff_summand)
 
 
 def make_xarray_based(name, param, chunks=None):
@@ -128,41 +133,18 @@ def make_xarray_based(name, param, chunks=None):
     param: xarray.DataArray
         Parameter in xarray format
     """
-    if isinstance(param, (int, float)):
-        param = np.array([param])
-    if isinstance(param, list):
-        param = np.array(param)
-    if isinstance(param, np.ndarray):
-        param = xr.DataArray(param, coords={name: param})
+
+    if param is None:
+        return None
+    param = np.atleast_1d(param)
+    param = xr.DataArray(param, coords={name: param})
     if chunks is not None:
-        param = param.chunk({param.dims[0]: chunks})
+        param = param.chunk({name: chunks})
 
     return param
 
 
-def xr_flatten(da):
-    """
-    Flatten DataArray to a 1D array.
-
-    Parameters
-    ----------
-    da: xarray.DataArray
-        DataArray to be flattened.
-
-    Returns
-    -------
-    flattened: np.array
-        1D array containing the data of the DataArray
-    """
-
-    dim_names = list(da.dims)
-    crd = [da[d] for d in dim_names]
-    coords = dict(zip(dim_names, [("flat", a) for a in [b.flatten() for b in np.meshgrid(*crd, indexing="ij")]]))
-    flattened = xr.DataArray(data=da.values.flatten(), coords=coords, dims="flat")
-    return flattened
-
-
-def xr_distance(a, b, dims=["x", "y"]):
+def xr_distance(a, b, spatial_coordinates=None):
     """
     Calculates distance between a and b along dimensions dims.
 
@@ -174,32 +156,38 @@ def xr_distance(a, b, dims=["x", "y"]):
 
     Returns
     -------
-
+    xr.DataArray
     """
-
+    if spatial_coordinates is None:
+        spatial_coordinates = ["x", "y"]
 
     sqr = 0.0
-    for d in dims:
+    for d in spatial_coordinates:
         sqr = sqr + (a[d] - b[d]) ** 2
     d = np.sqrt(sqr)
     return d
 
 
-def xr_delay(a, b, dim="datetime"):
+def xr_delay(a, b, variable="datetime"):
     """
+    Calculates delay in fractional days between a datetime variable present in both a and b.
 
     Parameters
     ----------
-    a
-    b
-    dim : str, optional
+    a : xr.Dataset or xr.DataArray
+    b : xr.Dataset or xr.DataArray
+    variable : str, optional
+
 
     Returns
     -------
+    xr.DataArray
 
     """
 
-    d = (b[dim] - a[dim]).astype(int) / (24 * 3.6e12)  # convert to fractional days
+    d = (b[variable] - a[variable]).astype(int) / (
+        24 * 3.6e12
+    )  # convert to fractional days
     return d
 
 
@@ -242,7 +230,7 @@ def _smooth_nan(U, sigma, mode="constant", cval=0.0):
 def xr_smooth(
     dataarray,
     sigma,
-    dims=["x", "y"],
+    dims=None,
     fill_value=0.0,
     ignore_nans=False,
 ):
@@ -269,6 +257,8 @@ def xr_smooth(
         Smoothed DataArray.
 
     """
+    if dims is None:
+        dims = ["x", "y"]
 
     if ignore_nans:
         g_filter = _smooth_nan
@@ -294,15 +284,19 @@ def xr_smooth(
 
 def xr_make_nondecreasing(array, dim):
     """
-
+    Make an array nondecreasing along a dimension.
 
     Parameters
     ----------
-    array
-    dim
+    array: xarray.DataArray
+        Array to make nondecreasing.
+    dim: str
+        Dimension to make nondecreasing.
 
     Returns
     -------
+    xarray.DataArray
+        Nondecreasing array.
 
     """
 
@@ -316,47 +310,64 @@ def xr_make_nondecreasing(array, dim):
     )
 
 
-def xr_calculate_rate(array, dim="datetime", label="lower"):
+def xr_calculate_rate(
+    array, dim="datetime", label="lower", time_conversion_factor=None
+):
     """
+    Calculate the rate of change of an array along a time dimension.
 
     Parameters
     ----------
-    array
-    dim
-    label
+    array : xarray.DataArray
+        Array to calculate the rate for.
+    dim : str, optional
+        Dimension along which to calculate the rate. The default is "datetime".
+        The unit of the index coordinate is assumed to represent time.
+    label : str, optional
+        Label to use for the difference. The default is "lower".
+    time_conversion_factor : float, optional
+        Conversion factor for the time dimension. The default is None.
+        If None, the rates is set in terms of sidereal year. If a value of
+        1.0 is used, the rate is set in terms of seconds.
 
     Returns
     -------
+    xarray.DataArray
+        Rate in units determined by the time_conversion_factor.
 
     """
+    if time_conversion_factor is None:
+        SECONDS_IN_SIDEREAL_YEAR = 31_558_149.54
+        time_conversion_factor = SECONDS_IN_SIDEREAL_YEAR
     s_diff = array.diff(dim, label=label)
-    t_diff = array[dim].diff(dim, label=label).dt.days
-    return s_diff / t_diff
+    t_diff = array[dim].diff(dim, label=label).dt.total_seconds()
+    return time_conversion_factor * s_diff / t_diff
 
 
-# TODO: allowed for "out" specification where the result is to be stored
-def samples_to_density_grid(
+def aggregate_to_grid(
     samples,
-    marginalize_dims,
     target_step,
     weights=None,
     target_start=None,
     target_stop=None,
     target=None,
+    marginalize_dims=None,
     operator=np.add,
     order=1,
 ):
-    """Convert samples to a density grid.
+    """Aggregate values / samples to a grid based on weights / measures.
+    This operation is essentially equal to the construction of a histogram with bins
+    of specified polynomial order.
 
     Parameters
     ----------
     samples : xarray.DataArray or xarray.Dataset
-        Samples to convert to a density grid. The samples are assumed to be
+        Samples to aggregate to a grid. The samples are assumed to be
         stored in a DataArray with a dimension for each sample dimension and
         a dimension for the sample coordinates. The selection of variables or
         dimensions is determined by the target argument.
     marginalize_dims : list of str or str
-        Dimensions to marginalize over.
+        Dimensions to aggregate / marginalize over.
     target_step : float or list of float
         Step size for the target grid.
     weights : xarray.DataArray, optional
@@ -385,115 +396,75 @@ def samples_to_density_grid(
     grid : xarray.DataArray
         The density grid.
     """
+
+    # handle defaults
     if weights is None:
         weights = xr.DataArray(1.0)
-
-    if isinstance(samples, xr.Dataset):
-        if target is None:
-            target = list(samples.data_vars.keys())
-        elif isinstance(target, str):
-            target = [target]
-        elif not isinstance(target, list):
-            raise ValueError(
-                f"target should be None, a string, or a list of strings, not {type(target)}"
-            )
-
-        samples = samples[target].to_array(dim="__var__")
-        target = "__var__"
-
-    elif isinstance(samples, xr.DataArray):
-        if target is None:
-            if samples.name is None:
-                raise ValueError(
-                    "either target should be specified, or the dataset should have its name attribute set"
-                )
-            samples = samples.expand_dims(dim={"__var__": [samples.name]})
-        elif isinstance(target, str):
-            if target not in samples.dims:
-                # override dataarray name
-                samples = samples.expand_dims(dim={"__var__": [target]})
-        else:
-            raise ValueError(
-                f"target {target} not in samples dimensions {samples.dims}"
-            )
-        target = "__var__"
-
+    if marginalize_dims is None:
+        marginalize_dims = []
     if isinstance(marginalize_dims, str):
         marginalize_dims = [marginalize_dims]
 
-    # if the marginalize_dims are present in both samples and weights,
-    # they should be broadcasted to the same shape before flattening and further processing
-    samples_has_marginalize_dims = np.intersect1d(samples.dims, marginalize_dims).size > 0
-    weights_has_marginalize_dims = np.intersect1d(weights.dims, marginalize_dims).size > 0
-    if samples_has_marginalize_dims and weights_has_marginalize_dims:
-        exclude_dims = np.setdiff1d(weights.dims + samples.dims, marginalize_dims)
+    # preprocess samples -> organize target in dedicated dimensions
+    samples, tg_dim = _prepare_target(samples, target)
+
+    # determine target grid dimensions
+    tg_grid_dims = list(samples.coords[tg_dim].data)
+
+    # determine broadcasted dimensions: dims that appear only in the weights
+    # and are therefore fully broadcasted
+    bc_dims = [d for d in weights.dims if d not in samples.dims]
+
+    # if any of the marginalize_dims are present in the weights, then we do a full broadcast
+    # over all sample dims -- this necessary to discard the weights that will be located
+    # outside of the grid later on
+    if set(weights.dims) & set(marginalize_dims):
+        exclude_dims = set(bc_dims) | set([tg_dim])
         samples, weights = xr.broadcast(samples, weights, exclude=exclude_dims)
 
-    # flatten the samples and weights
-    if samples_has_marginalize_dims:
-        # not sure if there is a use case without this condition
-        samples = (
-            samples.reset_index(marginalize_dims)
-            .stack({"__samples__": marginalize_dims})
-            .transpose(..., "__samples__", target)
-        )
+    # determine marginalized dimensions
+    mrg_dims = set(marginalize_dims) & set(samples.dims)
+    if mrg_dims < set(marginalize_dims):
+        raise ValueError(f"marginalize_dims {set(marginalize_dims)-mrg_dims} not found")
+    w_marginalize_dims = [d for d in marginalize_dims if d in weights.dims]
 
-    if weights_has_marginalize_dims:
-        weights = (
-            weights.reset_index(marginalize_dims)
-            .stack({"__samples__": marginalize_dims})
-            .transpose(..., "__samples__")
-        )
-        weight_core_dims = ["__samples__"]
-    else:
-        weight_core_dims = []
-    target_dimensions = samples.coords[target].values
+    # determine core dimensions for samples, weights and outputs
+    samples_core_dims = tuple(marginalize_dims) + tuple([tg_dim])
+    weights_core_dims = tuple(w_marginalize_dims) + tuple(bc_dims)
+    output_core_dims = tuple(tg_grid_dims) + tuple(bc_dims)
 
-    start_full, stop_full = get_full_start_stop(
-        samples.values, target_step, target_start
+    # determine target grid
+    start, step, grid_size = _determine_target_grid(
+        samples, target_step, target_start, target_stop, tg_dim
     )
-    if target_start is None:
-        target_start = start_full
-    if target_stop is None:
-        target_stop = stop_full
-
-    start, step, stop = np.broadcast_arrays(target_start, target_step, target_stop)
-    grid_size = np.ceil((stop - start) / step).astype(int) + 1
-
-    if "__samples__" in weights.dims:
-        weight_core_dims = ["__samples__"]
-    else:
-        weight_core_dims = []
 
     grid = xr.apply_ufunc(
-        _samples_to_density_grid,
+        _aggregate_to_grid,
         samples,
         start,
         step,
         grid_size,
         weights,
-        kwargs={"operator": operator, "order": order},
-        input_core_dims=[["__samples__", target], [], [], [], weight_core_dims],
-        exclude_dims=set(("__samples__", target)),
-        output_core_dims=[target_dimensions],
+        kwargs={
+            "operator": operator,
+            "order": order,
+            "n_marginalize": len(mrg_dims),
+            "n_broadcast": len(bc_dims),
+        },
+        input_core_dims=[samples_core_dims, [], [], [], weights_core_dims],
+        exclude_dims=set(samples_core_dims),
+        output_core_dims=[output_core_dims],
     )
-    target_size = grid.shape[-len(target_dimensions) :]
 
     coord_list = [
-        strt + np.arange(sz) * stp for strt, sz, stp in zip(start, target_size, step)
+        strt + np.arange(sz) * stp for strt, sz, stp in zip(start, grid_size, step)
     ]
-    grid = grid.assign_coords(
-        {dim: crd for dim, crd in zip(target_dimensions, coord_list)}
-    )
+    grid = grid.assign_coords({dim: crd for dim, crd in zip(tg_grid_dims, coord_list)})
 
     return grid
 
 
-# TODO : automatically generate step values from the samples
-# p=(10.**(np.floor(np.log10(d.values/20)).astype(int)))
-# pp=p[None,:]*np.array([1,2,5])[:,None] # use steps of 1, 2, or 5 times the highest power of 10
-# q=pp/(d.values/20) # find highest value lower than 1
-def get_full_start_stop(samples, step, anchor=None):
+def _full_start_stop(samples, step, anchor=None):
     """Get the start and stop of a grid that covers all samples. The grid is defined by the
     step size and the (optional) anchor point. By default, the anchor point is 0.0.
 
@@ -520,13 +491,9 @@ def get_full_start_stop(samples, step, anchor=None):
         anchor = 0.0
 
     # convert inputs to numpy arrays
-    samples = np.asarray(samples)
+    samples = np.atleast_2d(samples)
     step = np.asarray(step)
     anchor = np.asarray(anchor)
-
-    # accommodate for the case where only one dimension is given
-    if len(samples.shape) == 1:
-        samples = samples[:, None]
 
     # determine location of samples in grid relative to anchor
     index = np.floor((samples - anchor) / step).astype(int)
@@ -543,8 +510,57 @@ def get_full_start_stop(samples, step, anchor=None):
     return start, stop
 
 
-# following function is adapted from code by Reimer Weits, 2022
-def _samples_to_density_grid(
+def _determine_target_grid(samples, target_step, target_start, target_stop, tg_dim):
+    start_full, stop_full = _full_start_stop(
+        samples.transpose(..., tg_dim).values, target_step, target_start
+    )
+    if target_start is None:
+        target_start = start_full
+    if target_stop is None:
+        target_stop = stop_full
+    start, step, stop = np.broadcast_arrays(
+        np.atleast_1d(target_start),
+        np.atleast_1d(target_step),
+        np.atleast_1d(target_stop),
+    )
+    grid_size = np.ceil((stop - start) / step - ROUND_THRESHOLD).astype(int) + 1
+    return start, step, grid_size
+
+
+def _prepare_target(samples, target, tg_dim="__target__"):
+    # convert dataset to single dataarray
+    if isinstance(samples, xr.Dataset):
+        if target is None:
+            target = list(samples.data_vars.keys())
+        elif isinstance(target, str):
+            target = [target]
+        elif not isinstance(target, list):
+            raise ValueError(
+                f"target should be None, a string, or a list of strings, not {type(target)}"
+            )
+        samples = samples[target].to_array(dim=tg_dim)
+
+    # put target variables in a specific dimension
+    elif isinstance(samples, xr.DataArray):
+        if target is None:
+            if samples.name is None:
+                raise ValueError(
+                    "either target should be specified, or the dataset should have its name attribute set"
+                )
+            samples = samples.expand_dims(dim={tg_dim: [samples.name]})
+        elif isinstance(target, (str, collections.abc.Iterable)):
+            if target not in samples.dims:
+                targets = np.atleast_1d(target)
+                samples = samples.expand_dims(dim={tg_dim: targets})
+        else:
+            raise ValueError(
+                f"target {target} not in samples dimensions {samples.dims}"
+            )
+
+    return samples, tg_dim
+
+
+def _aggregate_to_grid(
     samples,
     target_start,
     target_step,
@@ -553,6 +569,7 @@ def _samples_to_density_grid(
     operator=np.add,
     order=1,
     out=None,
+    **kwargs,
 ):
     """Converts a set of samples in N-dimensions to a density on
     and N-dimensional grid.
@@ -560,7 +577,7 @@ def _samples_to_density_grid(
     Parameters
     ----------
     samples : array_like
-        The samples to be converted to a grid. The last dimension is assumed to be the dimension
+        The samples to be aggregated to a grid. The last dimension is assumed to be the dimension
         of the target quantities, the second last dimension is assumed to be the dimension of
         the samples. All other dimensions are maintained in the output. If weights are supplied,
         the dimension of the weights should be broadcastable to the dimension of the samples.
@@ -592,7 +609,7 @@ def _samples_to_density_grid(
 
     """
     # basic data topology
-    samples = np.asarray(samples)
+    samples = np.atleast_2d(samples)
     target_step = np.asarray(target_step)
     target_start = np.asarray(target_start)
 
@@ -602,22 +619,9 @@ def _samples_to_density_grid(
     else:
         weights = np.asarray(weights)
 
-    # accommodate for the case where only one dimensional array of samples is given
-    if len(samples.shape) == 1:
-        samples = samples[:, None]
-
-    # determine relevant sizes and shapes
+    # determine target shape
     ndim_target = samples.shape[-1]
-    sample_size = samples.shape[-2]
     assert ndim_target <= 8, "only up to 8 dimensions are supported"
-
-    # cater for the maintained dimensions of both samples and weights
-    maintained_shape, index_shape, weight_shape, output_shape = _get_shapes(
-        samples, weights, target_shape
-    )
-
-    # generate indices of maintained dimensions
-    maintained_indices = _generate_indices(sample_size, maintained_shape)
 
     # determine target shape
     if target_shape is None:
@@ -633,98 +637,121 @@ def _samples_to_density_grid(
             len(target_shape) == ndim_target
         ), "target shape must have same length as samples"
 
-    # check if out has correct shape
-    if out is not None:
+    # cater for the maintained dimensions of both samples and weights
+    n_mrg = kwargs.get("n_marginalize", 0)
+    n_bc = kwargs.get("n_broadcast", 0)
+    n_maintained = len(samples.shape) - n_mrg - 1
+    mt_shape = samples.shape[:n_maintained]
+    bc_shape = weights.shape[-n_bc:] if n_bc > 0 else ()
+    output_shape = mt_shape + tuple(target_shape) + bc_shape
+
+    # prepare output grid
+    if out is None:
+        out = np.zeros(output_shape)
+    else:
         assert (
             out.shape == output_shape
         ), f"out has wrong shape, should be {output_shape}"
 
-    #
+    # broadcast target start and step
     target_start = np.broadcast_to(target_start, (ndim_target,))
     target_step = np.broadcast_to(target_step, (ndim_target,))
     target_size = np.asarray(target_shape)
 
     # determine location of samples in grid relative to start
-    d, r = np.divmod(samples - target_start, target_step)
-    grid_index = d.astype(int)
-    frac = r / target_step  # normalize to [0, 1]
-
-    # if request order is 0, round to nearest grid point
     if order == 0:
-        frac = np.round(frac)
+        grid_index = np.rint((samples - target_start) / target_step).astype(int)
+    elif order == 1:
+        d, r = np.divmod(samples - target_start, target_step)
+        grid_index = d.astype(int)
+        frac = r / target_step  # normalize to [0, 1]
+    else:
+        raise ValueError("only order 0 and 1 are supported")
 
-    # broadcast grid indices
-    grid_index = np.broadcast_to(grid_index, index_shape)
-    frac = np.broadcast_to(frac, index_shape)
-    weights = np.broadcast_to(weights, weight_shape)
-
-    full_grid_index = np.concatenate([maintained_indices, grid_index], -1)
-    full_dim = full_grid_index.shape[-1]
+    # set up the indices for the maintained sample dimensions
+    outer_index = np.indices(samples.shape[:-1])
 
     # filter out samples that are outside the grid
     flt = np.all(np.logical_and(grid_index >= 0, grid_index < target_size - 1), axis=-1)
-    full_grid_index = full_grid_index[flt]
-    frac = frac[flt]
-    weights = weights[flt]
+    grid_index = grid_index[flt]
+    outer_index = outer_index[:n_maintained, flt]
+    if len(weights.shape) >= len(flt.shape):
+        weights = weights[flt]
 
-    # prepare output grid
-    if out is None:
-        out = np.zeros(output_shape)
-
-    out = _burn_to_grid(
-        full_grid_index, frac, weights, out, operator, ndim_target, full_dim
-    )
+    if order == 0:
+        out = _burn_to_grid_0(grid_index, weights, out, operator, outer_index)
+    elif order == 1:
+        frac = frac[flt]
+        out = _burn_to_grid_1(grid_index, frac, weights, out, operator, outer_index)
 
     return out
 
 
-def _generate_indices(sample_size, maintained_shape):
-    maintained_indices = np.moveaxis(np.indices(maintained_shape), 0, -1)
-    maintained_indices = np.expand_dims(maintained_indices, axis=-2)
-    m_shape = maintained_shape + (sample_size, len(maintained_shape))
-    maintained_indices = np.broadcast_to(maintained_indices, m_shape)
-    return maintained_indices
+def _burn_to_grid_0(index, weights, out, operator, outer_index):
+    # zeroth order binning / inverse nearest neighbour interpolation
+    # index points to the bin index
+    # weights are the weights of the samples
+    # out is the output grid
+    # operator is the operator used to combine the weights of samples that fall into the same grid cell
+    # outer_index is the index of the maintained dimensions
+
+    inner_index = np.moveaxis(index, -1, 0)
+    local_index = tuple(outer_index) + tuple(inner_index)
+    operator.at(out, local_index, weights)
+
+    return out
 
 
-def _get_shapes(samples, weights, target_shape):
-    ndim_target = samples.shape[-1]
-    sample_size = samples.shape[-2]
-
-    maintained_shape = np.broadcast_shapes(samples.shape[:-2], weights.shape[:-1])
-    index_shape = maintained_shape + (sample_size, ndim_target)
-    weight_shape = maintained_shape + (sample_size,)
-    output_shape = maintained_shape + tuple(target_shape)
-
-    return maintained_shape, index_shape, weight_shape, output_shape
-
-
-def _burn_to_grid(index, frac, weights, out, operator, ndim_target, full_dim):
-    # index points to a corner of a hypercube
+def _burn_to_grid_1(index, frac, weights, out, operator, outer_index):
+    # first order binning / inverse linear interpolation
+    # index points to the "lowerleft" corner of a hypercube
     # frac is the fractional distance from that corner to the sample
     # weights are the weights of the samples
     # out is the output grid
     # operator is the operator used to combine the weights of samples that fall into the same grid cell
-    # ndim_target is the number of dimensions of the target grid
+    # outer_index is the index of the maintained dimensions
 
     # iterate over all hypercube corners by a bitwise representation
     # generate sequence of numbers from 0 to 2**ndim, representing all possible
     # combinations of 0 and 1 for ndim dimensions
+    ndim_target = index.shape[-1]
     sequence = np.arange(2**ndim_target, dtype=np.uint8)
 
     # unpack the bits of the sequence into a matrix of 0 and 1
     allbits = np.unpackbits(sequence[:, None], axis=1).astype(int)
     offset_hypercube = allbits[:, -ndim_target:]
-    ext_offset_hypercube = allbits[:, -full_dim:]
+
+    n_mt = len(outer_index)
+    n_bc = len(out.shape) - ndim_target - n_mt
+    new_axes = n_bc * (np.newaxis,)
 
     # iterate over all corners of the hypercube, placing the contributions at the right
     # grid points
-    for offset, ext_offset in zip(offset_hypercube, ext_offset_hypercube):
+    for offset in offset_hypercube:
         # compute contribution at this corner
         multilinear_contribution = np.prod(
             ((frac) ** (offset)) * (1 - frac) ** (1 - offset), axis=1
-        )
+        )[..., *new_axes]
         weighted_contribution = weights * multilinear_contribution
-        local_index = tuple((index + ext_offset).T)
+        offset_index = np.moveaxis(index + offset, -1, 0)
+        local_index = tuple(outer_index) + tuple(offset_index)
         operator.at(out, local_index, weighted_contribution)
 
     return out
+
+
+def coarsen_stacked(stacked, coarsening_factor, stacked_dim="loc", dims=None):
+    if dims is None:
+        dims = ["x", "y"]
+
+    if coarsening_factor <= 1:
+        coarse_stacked = stacked
+    else:
+        unstacked = stacked.unstack(stacked_dim).sortby(dims)
+        unstacked = unstacked.coarsen(
+            {d: coarsening_factor for d in dims}, boundary="pad"
+        ).sum()
+        coarse_stacked = unstacked.stack({stacked_dim: dims})
+        coarse_stacked = coarse_stacked.dropna(stacked_dim)
+
+    return coarse_stacked

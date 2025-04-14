@@ -72,12 +72,16 @@ coordinates: &coordinates
     interval: [1.0e-3, 2.0]
 
 # SECTION 2: MODULE SPECIFIC SETTINGS
-modules:
-  dummy_module:
-    data_sources:
-      dummy_data_in: *data_in
-    data_sinks:
-      dummy_data_out: *data_out
-    dimensions: *dimensions
-    coordinates: *coordinates
-    n_workers: 1
+
+
+# SECTION 3: TASKS
+tasks:
+  dummy_task:
+    configuration:
+      data_sources:
+        dummy_data_in: *data_in
+      data_sinks:
+        dummy_data_out: *data_out
+      dimensions: *dimensions
+      coordinates: *coordinates
+      n_workers: 1

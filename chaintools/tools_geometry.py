@@ -1,5 +1,5 @@
 """
-Contains spatial/geographic functions for xarray-based data arrays.   
+Contains spatial/geographic functions for xarray-based data arrays.
 """
 
 from shapely.geometry import Point
@@ -8,7 +8,10 @@ import xarray as xr
 import geopandas as gpd
 import numpy as np
 
-def xr_cell_polygon(xrdata, cell_radius=None, cap_style="square", spatial_coordinates=None):
+
+def xr_cell_polygon(
+    xrdata, cell_radius=None, cap_style="square", spatial_coordinates=None
+):
     """
     Create a cell around each point in xrdata, then buffer to create a polygon or multipolygon.
 
@@ -33,7 +36,8 @@ def xr_cell_polygon(xrdata, cell_radius=None, cap_style="square", spatial_coordi
     x, y = spatial_coordinates
     x_xr, y_xr = xr.broadcast(xrdata[x], xrdata[y])
 
-    polygon = multipoints(points(x_xr, y_xr)).buffer(cell_radius, cap_style=cap_style)
+    mpoints = multipoints(points(x_xr, y_xr), indices=xr.zeros_like(x_xr, dtype=int))
+    polygon = mpoints[0].buffer(cell_radius, cap_style=cap_style)
     return polygon
 
 
@@ -83,7 +87,6 @@ def xr_cell_polygon_overlap_fraction(
     )
 
 
-
 def _overlap_fraction(x, y, poly, xy_buffer, cap_style):
     """
     Calculates the fraction of overlap between a polygon and a cell. Overlap = 1 means cell is entirely within polygon.
@@ -100,7 +103,7 @@ def _overlap_fraction(x, y, poly, xy_buffer, cap_style):
         Radius of cell. When "square" cap_style is used, this is half the side length of the square.
     cap_style: str
         Cap style for cell buffer.
-    
+
     Returns
     -------
     float or array-like

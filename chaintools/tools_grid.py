@@ -6,6 +6,8 @@ import collections
 
 # fraction of interval to ignore for rounding
 ROUND_THRESHOLD = 1.0e-6
+SECONDS_IN_SIDEREAL_YEAR = 31_558_149.54
+SECONDS_IN_DAY = 86_400
 
 
 def bin_diff(value, dim, fill_value=None, direction=-1):
@@ -441,19 +443,20 @@ def aggregate_to_grid(
     grid = xr.apply_ufunc(
         _aggregate_to_grid,
         samples,
-        start,
-        step,
-        grid_size,
         weights,
         kwargs={
+            "target_start": start,
+            "target_step": step,
+            "target_shape": grid_size,
             "operator": operator,
             "order": order,
             "n_marginalize": len(mrg_dims),
             "n_broadcast": len(bc_dims),
         },
-        input_core_dims=[samples_core_dims, [], [], [], weights_core_dims],
+        input_core_dims=[samples_core_dims, weights_core_dims],
         exclude_dims=set(samples_core_dims),
         output_core_dims=[output_core_dims],
+        vectorize=True,
     )
 
     coord_list = [
@@ -562,10 +565,10 @@ def _prepare_target(samples, target, tg_dim="__target__"):
 
 def _aggregate_to_grid(
     samples,
+    weights,
     target_start,
     target_step,
     target_shape=None,
-    weights=None,
     operator=np.add,
     order=1,
     out=None,
@@ -613,11 +616,11 @@ def _aggregate_to_grid(
     target_step = np.asarray(target_step)
     target_start = np.asarray(target_start)
 
-    # set default weights
-    if weights is None:
-        weights = np.asarray(1.0)
-    else:
-        weights = np.asarray(weights)
+    # # set default weights
+    # if weights is None:
+    #     weights = np.asarray(1.0)
+    # else:
+    weights = np.asarray(weights)
 
     # determine target shape
     ndim_target = samples.shape[-1]
@@ -633,6 +636,8 @@ def _aggregate_to_grid(
         target_shape = out.shape[-ndim_target:]
     else:
         assert out is None, "out and target_shape cannot be given at the same time"
+        if not isinstance(target_shape, (list, tuple, np.ndarray)):
+            target_shape = [target_shape]
         assert (
             len(target_shape) == ndim_target
         ), "target shape must have same length as samples"
@@ -661,10 +666,12 @@ def _aggregate_to_grid(
     # determine location of samples in grid relative to start
     if order == 0:
         grid_index = np.rint((samples - target_start) / target_step).astype(int)
+        buffer = 0
     elif order == 1:
         d, r = np.divmod(samples - target_start, target_step)
         grid_index = d.astype(int)
         frac = r / target_step  # normalize to [0, 1]
+        buffer = 1
     else:
         raise ValueError("only order 0 and 1 are supported")
 
@@ -672,7 +679,9 @@ def _aggregate_to_grid(
     outer_index = np.indices(samples.shape[:-1])
 
     # filter out samples that are outside the grid
-    flt = np.all(np.logical_and(grid_index >= 0, grid_index < target_size - 1), axis=-1)
+    flt = np.all(
+        np.logical_and(grid_index >= 0, grid_index < target_size - buffer), axis=-1
+    )
     grid_index = grid_index[flt]
     outer_index = outer_index[:n_maintained, flt]
     if len(weights.shape) >= len(flt.shape):
@@ -755,3 +764,126 @@ def coarsen_stacked(stacked, coarsening_factor, stacked_dim="loc", dims=None):
         coarse_stacked = coarse_stacked.dropna(stacked_dim)
 
     return coarse_stacked
+
+
+def prepare_grid_selection(samples, grid, time_conversion_factor=None):
+    """
+    Prepare the grid selection information for the given samples and grid.
+    This function prepares the spatial and temporal grid indices corresponding to the provided
+    samples and grid data. It returns a dataset containing the selected grid coordinates and
+    temporal information.
+    Parameters
+    ----------
+    samples : xr.Dataset
+        The dataset containing the samples with spatial and temporal coordinates.
+    grid : xr.Dataset
+        The dataset containing the grid data with spatial and temporal coordinates.
+    time_conversion_factor : float, optional
+        The factor to convert time units, default is None which uses the sidereal year.
+    Returns
+    -------
+    xr.Dataset
+        A dataset containing the selected grid coordinates and temporal information.
+    """
+    return_data = prepare_spatial_grid_selection(samples, grid)
+    temporal_data = prepare_temporal_grid_selection(
+        samples, grid, time_conversion_factor
+    )
+    return_data = return_data.merge(temporal_data, compat="override")
+
+    return return_data
+
+
+def prepare_spatial_grid_selection(samples, grid):
+    """
+    Prepare the spatial grid selection information for the given samples and grid.
+    This function prepares the spatial grid indices corresponding to the provided samples and
+    grid data. It returns a dataset containing the selected grid coordinates.
+    Parameters
+    ----------
+    samples : xr.Dataset
+        The dataset containing the samples with spatial coordinates.
+    grid : xr.Dataset
+        The dataset containing the grid data with spatial coordinates.
+    Returns
+    -------
+    xr.Dataset
+        A dataset containing the selected grid coordinates.
+    """
+    if "loc" in grid.dims:
+        grid = grid.unstack("loc").sortby(["x", "y"])
+    x_grid = grid["x"].sel({"x": samples["x"]}, method="nearest")
+    y_grid = grid["y"].sel({"y": samples["y"]}, method="nearest")
+    return xr.Dataset({"x_grid": x_grid, "y_grid": y_grid}).drop_vars(["x", "y"])
+
+
+def prepare_temporal_grid_selection(samples, grid, time_conversion_factor=None):
+    """
+    Prepare the temporal grid selection information for the given samples and grid.
+    This function prepares the temporal grid indices corresponding to the provided samples and
+    grid data. It returns a dataset containing the selected temporal information.
+    Parameters
+    ----------
+    samples : xr.Dataset
+        The dataset containing the samples with temporal coordinates.
+    grid : xr.Dataset
+        The dataset containing the grid data with temporal coordinates.
+    time_conversion_factor : float, optional
+        The factor to convert time units, default is None which uses the sidereal year.
+    Returns
+    -------
+    xr.Dataset
+        A dataset containing the selected temporal information.
+    """
+    # determine time basis factor for the rate: default gives rate per sidereal year
+    # time_conversion_factor of 1 gives rate per second
+    if time_conversion_factor is None:
+        time_conversion_factor = SECONDS_IN_SIDEREAL_YEAR
+
+    datetime_grid = get_datetime_interval(samples, grid)
+
+    denom = datetime_grid.diff("datetime_bound").squeeze("datetime_bound")
+    num = samples["datetime"] - datetime_grid
+    w_interp = 1 - np.abs(num.dt.total_seconds() / denom.dt.total_seconds()).clip(0, 1)
+    num_rate = xr.DataArray([-1.0, 1.0], coords={"datetime_bound": ["lower", "upper"]})
+    w_rate = num_rate * time_conversion_factor / denom.dt.total_seconds()
+    return_data = xr.Dataset(
+        {
+            "datetime_grid": datetime_grid,
+            "w_datetime_interp": w_interp,
+            "w_datetime_rate": w_rate,
+        }
+    )
+    return return_data
+
+
+def get_datetime_interval(samples, datetime_series, datetime_dim="datetime"):
+    """
+    Get the datetime interval for the given samples and datetime series.
+    This function creates a grid of datetime intervals based on the provided samples and
+    datetime series. It returns a dataset containing the lower and upper bounds of the datetime
+    intervals.
+    Parameters
+    ----------
+    samples : xr.Dataset
+        The dataset containing the samples with temporal coordinates.
+    datetime_series : xr.DataArray
+        The series containing the datetime information.
+    datetime_dim : str, optional
+        The name of the datetime dimension in the datetime series, default is "datetime".
+    Returns
+    -------
+    xr.DataArray
+        A dataset containing the lower and upper bounds of the datetime intervals.
+    """
+    datetime_grid = xr.concat(
+        [
+            datetime_series[datetime_dim]
+            .sel({datetime_dim: samples[datetime_dim]}, method=method)
+            .drop_vars([datetime_dim])
+            for method in ["ffill", "bfill"]
+        ],
+        dim="datetime_bound",
+    ).assign_coords({"datetime_bound": ["lower", "upper"]})
+
+    return datetime_grid

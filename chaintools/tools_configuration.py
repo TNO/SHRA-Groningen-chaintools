@@ -19,16 +19,16 @@ from .tools_xarray import construct_path
 
 def configure(args: list, default_task_name: str = None) -> dict:
     """
-    Process the given arguments, identify the configuration filepath, and extract the correct configuration settings for
-    the requested module.
+    Process the given arguments, identify the configuration filepath, and extract the correct 
+    configuration settings for the requested module.
 
     Parameters
     ----------
     args : list
         List of input arguments
     default_task_name : str, optional
-        Task name. If given, will return the specific configuration for the requested task. Otherwise return all
-        configurations.
+        Task name. If given, will return the specific configuration for the requested task. 
+        Otherwise return all configurations.
 
     Returns
     -------
@@ -55,13 +55,35 @@ def configure(args: list, default_task_name: str = None) -> dict:
 
 
 def extract_task_config(config, task_name):
+    """
+    Extracts the configuration for a specific task from the main configuration dictionary.
+    If the task name is not provided, it returns the full configuration.
+    If the task name is provided but not found in the configuration, it raises an error.
+    Parameters
+    ----------
+    config : dict
+        The main configuration dictionary.
+    task_name : str or None
+        The name of the task for which to extract the configuration. If None, returns the full
+        configuration.
+    Returns
+    -------
+    task_config : dict
+        The configuration dictionary for the specified task, or the full configuration if no 
+        task name is provided
+    Raises
+    ------
+    SystemError
+        If the task name is provided but not found in the configuration, or if the tasks section
+        is missing from the configuration.
+    """
     if task_name is None:
         return config
 
     if "tasks" not in config:
         raise SystemError(
-            f"No tasks section found in configuration file."
-            "Cannot proceed to configure {task}"
+            "No tasks section found in configuration file."
+            f"Cannot proceed to configure {task_name}"
         )
 
     if task_name not in config["tasks"]:
@@ -76,6 +98,23 @@ def extract_task_config(config, task_name):
 
 
 def process_commandline(args):
+    """
+    Process the command line arguments to extract the configuration file path and task name.
+    Parameters
+    ----------
+    args : list
+        List of command line arguments. The first argument should be the path to the configuration
+        file, and the second argument (optional) should be the task name.
+    Returns
+    -------
+    commandline_args : Namespace
+        An object containing the parsed command line arguments, including the configuration 
+        file path and the task name.
+    Raises
+    ------
+    SystemError
+        If the configuration file path is not provided or does not exist.
+    """
     arg_parser = configargparse.ArgumentParser()
     arg_parser.add_argument(
         "configfile_path", type=str, help="The full path to the .json/.yaml config file"
@@ -113,7 +152,7 @@ def load_config(path: str) -> dict:
         raise SystemError(f"Configuration file {path} does not exist")
 
     local_path = Path(path)
-    with open(local_path, "r") as stream:
+    with open(local_path, "r", encoding="utf-8") as stream:
         ext = local_path.suffix
         if ext in [".yml", ".yaml"]:
             config = yaml.load(stream, Loader=yaml.SafeLoader)
@@ -198,6 +237,23 @@ def preamble(args: list, task_name: str = None) -> tuple[dict, Client]:
 
 
 def batched(iterable, n):
+    """
+    Yield successive n-sized chunks from iterable.
+    Parameters
+    ----------
+    iterable : iterable
+        An iterable object (e.g., list, string, etc.) to be batched.
+    n : int
+        The size of each batch. Must be at least 1.
+    Yields
+    ------
+    batch : tuple
+        A tuple containing the next n elements from the iterable.
+    Raises
+    ------
+    ValueError
+        If n is less than 1.
+    """
     # batched('ABCDEFG', 3) --> ABC DEF G
     if n < 1:
         raise ValueError("n must be at least one")
@@ -207,6 +263,23 @@ def batched(iterable, n):
 
 
 def exchange_suffix(data_stores_in, suffix_map: None):
+    """
+    Exchanges the suffixes of paths in the data stores according to a given suffix map.
+    If no suffix map is provided, it defaults to an empty dictionary, meaning no changes will
+    be made to the suffixes.
+    Parameters
+    ----------
+    data_stores_in : dict
+        Dictionary containing data stores with paths to be modified.
+    suffix_map : dict, optional
+        A mapping of old suffixes to new suffixes. If None, no suffix changes will
+        be applied.
+    Returns
+    -------
+    data_stores : dict
+        A new dictionary with the same structure as `data_stores_in`, but with paths modified
+        according to the provided suffix map.
+    """
     data_stores = deepcopy(data_stores_in)
     for name, data in data_stores.items():
         data_stores[name] = _exchange_suffix(data, suffix_map)
@@ -214,6 +287,23 @@ def exchange_suffix(data_stores_in, suffix_map: None):
 
 
 def _exchange_suffix(data, suffix_map: None):
+    """
+    Helper function to exchange suffixes in a single data store or a sequence of data stores.
+    If no suffix map is provided, it defaults to an empty dictionary, meaning no changes will
+    be made to the suffixes.
+    Parameters
+    ----------
+    data : dict or sequence
+        A single data store or a sequence of data stores containing paths to be modified.
+    suffix_map : dict, optional
+        A mapping of old suffixes to new suffixes. If None, no suffix changes will
+        be applied.
+    Returns
+    -------
+    data : dict or sequence
+        The modified data store or sequence of data stores with paths updated according to the
+        provided suffix map.
+    """
     if suffix_map is None:
         suffix_map = {}
     if isinstance(data, collections.abc.Sequence):
